@@ -1,4 +1,5 @@
 const std = @import("std");
+const std_compat = @import("compat.zig");
 const domain = @import("domain.zig");
 
 pub const Store = struct {
@@ -40,7 +41,7 @@ pub const Store = struct {
         const id = try std.fmt.allocPrint(self.allocator, "spn-{d}", .{self.spans.items.len + 1});
         errdefer self.allocator.free(id);
 
-        const stored_at_ms = std.time.milliTimestamp();
+        const stored_at_ms = std_compat.time.milliTimestamp();
         var record = try domain.materializeSpanRecord(self.allocator, payload, id, stored_at_ms);
         errdefer domain.freeSpanRecord(self.allocator, &record);
 
@@ -53,7 +54,7 @@ pub const Store = struct {
         const id = try std.fmt.allocPrint(self.allocator, "eval-{d}", .{self.evals.items.len + 1});
         errdefer self.allocator.free(id);
 
-        const stored_at_ms = std.time.milliTimestamp();
+        const stored_at_ms = std_compat.time.milliTimestamp();
         var record = try domain.materializeEvalRecord(self.allocator, payload, id, stored_at_ms);
         errdefer domain.freeEvalRecord(self.allocator, &record);
 
@@ -419,27 +420,24 @@ fn finalizeVerdict(summary: *domain.RunSummary) void {
 
 fn ensureDirExists(path: []const u8) !void {
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.makeDirAbsolute(path) catch |err| switch (err) {
+        std_compat.fs.makeDirAbsolute(path) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
         return;
     }
 
-    std.fs.cwd().makePath(path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try std_compat.fs.cwd().makePath(path);
 }
 
 fn readFileIfExists(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
     const file = if (std.fs.path.isAbsolute(path))
-        std.fs.openFileAbsolute(path, .{}) catch |err| {
+        std_compat.fs.openFileAbsolute(path, .{}) catch |err| {
             if (err == error.FileNotFound) return error.FileNotFound;
             return err;
         }
     else
-        std.fs.cwd().openFile(path, .{}) catch |err| {
+        std_compat.fs.cwd().openFile(path, .{}) catch |err| {
             if (err == error.FileNotFound) return error.FileNotFound;
             return err;
         };
@@ -447,25 +445,23 @@ fn readFileIfExists(allocator: std.mem.Allocator, path: []const u8, max_bytes: u
     return file.readToEndAlloc(allocator, max_bytes);
 }
 
-fn createFileForAppend(path: []const u8) !std.fs.File {
+fn createFileForAppend(path: []const u8) !std_compat.fs.File {
     if (std.fs.path.isAbsolute(path)) {
-        return std.fs.createFileAbsolute(path, .{ .truncate = false, .read = true });
+        return std_compat.fs.createFileAbsolute(path, .{ .truncate = false, .read = true });
     }
-    return std.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
+    return std_compat.fs.cwd().createFile(path, .{ .truncate = false, .read = true });
 }
 
 fn encodeJson(allocator: std.mem.Allocator, value: anytype) ![]u8 {
-    var out = std.io.Writer.Allocating.init(allocator);
-    defer out.deinit();
-    try std.json.Stringify.value(value, .{}, &out.writer);
-    return try out.toOwnedSlice();
+    return try std.json.Stringify.valueAlloc(allocator, value, .{});
 }
 
 test "store ingests and reloads jsonl data" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const data_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_dir = std_compat.fs.Dir.wrap(tmp.dir);
+    const data_dir = try tmp_dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(data_dir);
 
     var store = try Store.init(std.testing.allocator, data_dir);
@@ -499,7 +495,8 @@ test "list APIs filter by run and verdict" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const data_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_dir = std_compat.fs.Dir.wrap(tmp.dir);
+    const data_dir = try tmp_dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(data_dir);
 
     var store = try Store.init(std.testing.allocator, data_dir);

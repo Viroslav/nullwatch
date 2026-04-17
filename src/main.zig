@@ -1,4 +1,5 @@
 const std = @import("std");
+const std_compat = @import("compat.zig");
 const api = @import("api.zig");
 const config = @import("config.zig");
 const domain = @import("domain.zig");
@@ -6,6 +7,7 @@ const Store = @import("store.zig").Store;
 const version = @import("version.zig");
 
 const max_request_size: usize = 256 * 1024;
+const request_read_chunk: usize = 4096;
 
 const RuntimeConfig = struct {
     host: []const u8,
@@ -28,22 +30,33 @@ const RuntimeOverrides = struct {
     config_path: ?[]const u8 = null,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+const ArgCursor = struct {
+    args: []const [:0]const u8,
+    index: usize = 0,
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-    _ = args.next();
+    fn next(self: *ArgCursor) ?[]const u8 {
+        if (self.index >= self.args.len) return null;
+        defer self.index += 1;
+        return self.args[self.index];
+    }
+};
 
-    if (args.next()) |first_arg| {
+pub fn main(init: std.process.Init) !void {
+    std_compat.initProcess(init);
+    const allocator = std.heap.smp_allocator;
+
+    const args = try std_compat.process.argsAlloc(allocator);
+    defer std_compat.process.argsFree(allocator, args);
+
+    if (args.len > 1) {
+        const first_arg = args[1];
         if (std.mem.eql(u8, first_arg, "--export-manifest")) {
             try @import("export_manifest.zig").run();
             return;
         }
         if (std.mem.eql(u8, first_arg, "--from-json")) {
-            if (args.next()) |json_str| {
+            if (args.len > 2) {
+                const json_str = args[2];
                 try @import("from_json.zig").run(allocator, json_str);
             } else {
                 std.debug.print("error: --from-json requires a JSON argument\n", .{});
@@ -53,11 +66,11 @@ pub fn main() !void {
         }
     }
 
-    var args2 = try std.process.argsWithAllocator(allocator);
-    defer args2.deinit();
-    _ = args2.next();
-
-    const command = args2.next() orelse "serve";
+    var cursor = ArgCursor{
+        .args = args,
+        .index = 1,
+    };
+    const command = cursor.next() orelse "serve";
 
     if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "version")) {
         std.debug.print("nullwatch v{s}\n", .{version.string});
@@ -70,56 +83,56 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, command, "serve")) {
-        var parsed = try parseServeArgs(allocator, &args2);
+        var parsed = try parseServeArgs(allocator, &cursor);
         defer parsed.runtime.deinit(allocator);
         try runServer(allocator, parsed.runtime);
         return;
     }
 
     if (std.mem.eql(u8, command, "summary")) {
-        var parsed = try parseCommonArgs(allocator, &args2);
+        var parsed = try parseCommonArgs(allocator, &cursor);
         defer parsed.deinit(allocator);
         try runSummaryCommand(allocator, parsed.runtime);
         return;
     }
 
     if (std.mem.eql(u8, command, "runs")) {
-        var parsed = try parseRunsArgs(allocator, &args2);
+        var parsed = try parseRunsArgs(allocator, &cursor);
         defer parsed.common.runtime.deinit(allocator);
         try runRunsCommand(allocator, parsed.common.runtime, parsed.filter);
         return;
     }
 
     if (std.mem.eql(u8, command, "run")) {
-        var parsed = try parseRunDetailArgs(allocator, &args2);
+        var parsed = try parseRunDetailArgs(allocator, &cursor);
         defer parsed.common.runtime.deinit(allocator);
         try runDetailCommand(allocator, parsed.common.runtime, parsed.run_id);
         return;
     }
 
     if (std.mem.eql(u8, command, "spans")) {
-        var parsed = try parseSpansArgs(allocator, &args2);
+        var parsed = try parseSpansArgs(allocator, &cursor);
         defer parsed.common.runtime.deinit(allocator);
         try runSpansCommand(allocator, parsed.common.runtime, parsed.filter);
         return;
     }
 
     if (std.mem.eql(u8, command, "evals")) {
-        var parsed = try parseEvalsArgs(allocator, &args2);
+        var parsed = try parseEvalsArgs(allocator, &cursor);
         defer parsed.common.runtime.deinit(allocator);
         try runEvalsCommand(allocator, parsed.common.runtime, parsed.filter);
         return;
     }
 
     if (std.mem.eql(u8, command, "ingest-span")) {
-        var parsed = try parseJsonIngestArgs(allocator, &args2);
+        var parsed = try parseJsonIngestArgs(allocator, &cursor);
         defer parsed.common.runtime.deinit(allocator);
         try runSpanIngestCommand(allocator, parsed.common.runtime, parsed.json_payload);
         return;
     }
 
     if (std.mem.eql(u8, command, "ingest-eval")) {
-        var parsed = try parseJsonIngestArgs(allocator, &args2);
+        var parsed = try parseJsonIngestArgs(allocator, &cursor);
         defer parsed.common.runtime.deinit(allocator);
         try runEvalIngestCommand(allocator, parsed.common.runtime, parsed.json_payload);
         return;
@@ -134,58 +147,35 @@ fn runServer(allocator: std.mem.Allocator, runtime: RuntimeConfig) !void {
     var store = try Store.init(allocator, runtime.data_dir);
     defer store.deinit();
 
-    const addr = try std.net.Address.resolveIp(runtime.host, runtime.port);
-    var server = try addr.listen(.{ .reuse_address = true });
-    defer server.deinit();
+    const addr = try std.Io.net.IpAddress.resolve(std_compat.io(), runtime.host, runtime.port);
+    var server = try addr.listen(std_compat.io(), .{ .reuse_address = true });
+    defer server.deinit(std_compat.io());
 
     std.debug.print("nullwatch v{s}\n", .{version.string});
     std.debug.print("data dir: {s}\n", .{runtime.data_dir});
     std.debug.print("listening on http://{s}:{d}\n", .{ runtime.host, runtime.port });
 
     while (true) {
-        const conn = server.accept() catch |err| {
+        var conn = server.accept(std_compat.io()) catch |err| {
             std.debug.print("accept error: {}\n", .{err});
             continue;
         };
-        defer conn.stream.close();
+        defer conn.close(std_compat.io());
 
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const req_alloc = arena.allocator();
 
-        var req_buf: [max_request_size]u8 = undefined;
-        const n = conn.stream.read(&req_buf) catch continue;
-        if (n == 0) continue;
-        const raw = req_buf[0..n];
+        const full_request = readHttpRequest(req_alloc, &conn, max_request_size) catch |err| {
+            std.debug.print("read error: {}\n", .{err});
+            continue;
+        } orelse continue;
 
-        const first_line_end = std.mem.indexOf(u8, raw, "\r\n") orelse continue;
-        const first_line = raw[0..first_line_end];
+        const first_line_end = std.mem.indexOf(u8, full_request, "\r\n") orelse continue;
+        const first_line = full_request[0..first_line_end];
         var parts = std.mem.splitScalar(u8, first_line, ' ');
         const method = parts.next() orelse continue;
         const target = parts.next() orelse continue;
-
-        var full_request = raw;
-        if (api.extractHeader(raw, "Content-Length")) |cl_str| {
-            const content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
-            if (content_length > 0) {
-                const header_end_pos = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse continue;
-                const body_start = header_end_pos + 4;
-                const body_received = n - body_start;
-                if (body_received < content_length) {
-                    const total_size = body_start + content_length;
-                    if (total_size > max_request_size) continue;
-                    const full_buf = req_alloc.alloc(u8, total_size) catch continue;
-                    @memcpy(full_buf[0..n], raw);
-                    var total_read = n;
-                    while (total_read < total_size) {
-                        const extra = conn.stream.read(full_buf[total_read..total_size]) catch break;
-                        if (extra == 0) break;
-                        total_read += extra;
-                    }
-                    full_request = full_buf[0..total_read];
-                }
-            }
-        }
 
         const body = api.extractBody(full_request);
         var ctx = api.Context{
@@ -201,9 +191,53 @@ fn runServer(allocator: std.mem.Allocator, runtime: RuntimeConfig) !void {
             "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
             .{ response.status, response.body.len },
         ) catch continue;
-        _ = conn.stream.write(header) catch continue;
-        _ = conn.stream.write(response.body) catch continue;
+        var resp_write_buffer: [1024]u8 = undefined;
+        var writer = conn.writer(std_compat.io(), &resp_write_buffer);
+        writer.interface.writeAll(header) catch continue;
+        writer.interface.writeAll(response.body) catch continue;
+        writer.interface.flush() catch continue;
     }
+}
+
+fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, max_bytes: usize) !?[]u8 {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    var read_buffer: [request_read_chunk]u8 = undefined;
+    var reader = stream.reader(std_compat.io(), &read_buffer);
+
+    while (true) {
+        const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => {
+                if (buffer.items.len == 0) return null;
+                return error.UnexpectedEof;
+            },
+            else => |e| return e,
+        };
+
+        try buffer.appendSlice(allocator, line);
+        if (buffer.items.len > max_bytes) return error.RequestTooLarge;
+
+        if (std.mem.eql(u8, line, "\r\n") or std.mem.eql(u8, line, "\n")) break;
+    }
+
+    const header_end = std.mem.indexOf(u8, buffer.items, "\r\n\r\n") orelse return error.InvalidRequest;
+    const content_len = if (api.extractHeader(buffer.items[0 .. header_end + 4], "Content-Length")) |cl_str|
+        (std.fmt.parseInt(usize, cl_str, 10) catch return error.InvalidContentLength)
+    else
+        0;
+
+    const required = header_end + 4 + content_len;
+    if (required > max_bytes) return error.RequestTooLarge;
+
+    if (content_len > 0) {
+        const body = try allocator.alloc(u8, content_len);
+        defer allocator.free(body);
+        try reader.interface.readSliceAll(body);
+        try buffer.appendSlice(allocator, body);
+    }
+
+    return try allocator.dupe(u8, buffer.items[0..required]);
 }
 
 fn runSummaryCommand(allocator: std.mem.Allocator, runtime: RuntimeConfig) !void {
@@ -294,7 +328,7 @@ fn runEvalIngestCommand(allocator: std.mem.Allocator, runtime: RuntimeConfig, js
     try writeJsonToStdout(allocator, record);
 }
 
-fn parseServeArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !struct { runtime: RuntimeConfig } {
+fn parseServeArgs(allocator: std.mem.Allocator, args: *ArgCursor) !struct { runtime: RuntimeConfig } {
     var overrides = RuntimeOverrides{};
 
     while (args.next()) |arg| {
@@ -305,7 +339,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) 
     return .{ .runtime = try resolveRuntimeConfig(allocator, overrides) };
 }
 
-fn parseCommonArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+fn parseCommonArgs(allocator: std.mem.Allocator, args: *ArgCursor) !struct {
     runtime: RuntimeConfig,
 
     fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
@@ -321,7 +355,7 @@ fn parseCommonArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator)
     return .{ .runtime = try resolveRuntimeConfig(allocator, overrides) };
 }
 
-fn parseRunsArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+fn parseRunsArgs(allocator: std.mem.Allocator, args: *ArgCursor) !struct {
     common: struct { runtime: RuntimeConfig },
     filter: domain.RunFilter,
 } {
@@ -359,7 +393,7 @@ fn parseRunsArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !
     };
 }
 
-fn parseRunDetailArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+fn parseRunDetailArgs(allocator: std.mem.Allocator, args: *ArgCursor) !struct {
     common: struct { runtime: RuntimeConfig },
     run_id: []const u8,
 } {
@@ -377,7 +411,7 @@ fn parseRunDetailArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterat
     };
 }
 
-fn parseSpansArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+fn parseSpansArgs(allocator: std.mem.Allocator, args: *ArgCursor) !struct {
     common: struct { runtime: RuntimeConfig },
     filter: domain.SpanFilter,
 } {
@@ -419,7 +453,7 @@ fn parseSpansArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) 
     };
 }
 
-fn parseEvalsArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+fn parseEvalsArgs(allocator: std.mem.Allocator, args: *ArgCursor) !struct {
     common: struct { runtime: RuntimeConfig },
     filter: domain.EvalFilter,
 } {
@@ -451,7 +485,7 @@ fn parseEvalsArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) 
     };
 }
 
-fn parseJsonIngestArgs(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !struct {
+fn parseJsonIngestArgs(allocator: std.mem.Allocator, args: *ArgCursor) !struct {
     common: struct { runtime: RuntimeConfig },
     json_payload: []const u8,
 } {
@@ -474,7 +508,7 @@ fn parseJsonIngestArgs(allocator: std.mem.Allocator, args: *std.process.ArgItera
 }
 
 fn maybeParseRuntimeFlag(
-    args: *std.process.ArgIterator,
+    args: *ArgCursor,
     overrides: *RuntimeOverrides,
     arg: []const u8,
     allow_port_and_host: bool,
@@ -525,17 +559,17 @@ fn resolveRuntimeConfig(allocator: std.mem.Allocator, overrides: RuntimeOverride
     };
 }
 
-fn parseRequiredU16(args: *std.process.ArgIterator, flag: []const u8) !u16 {
+fn parseRequiredU16(args: *ArgCursor, flag: []const u8) !u16 {
     const value = try requireNext(args, flag);
     return std.fmt.parseInt(u16, value, 10);
 }
 
-fn parseRequiredUsize(args: *std.process.ArgIterator, flag: []const u8) !usize {
+fn parseRequiredUsize(args: *ArgCursor, flag: []const u8) !usize {
     const value = try requireNext(args, flag);
     return std.fmt.parseInt(usize, value, 10);
 }
 
-fn requireNext(args: *std.process.ArgIterator, flag: []const u8) ![]const u8 {
+fn requireNext(args: *ArgCursor, flag: []const u8) ![]const u8 {
     return args.next() orelse {
         std.debug.print("missing value for {s}\n", .{flag});
         return error.MissingArgument;
@@ -543,14 +577,12 @@ fn requireNext(args: *std.process.ArgIterator, flag: []const u8) ![]const u8 {
 }
 
 fn writeJsonToStdout(allocator: std.mem.Allocator, value: anytype) !void {
-    var out = std.io.Writer.Allocating.init(allocator);
-    defer out.deinit();
-    try std.json.Stringify.value(value, .{ .whitespace = .indent_2 }, &out.writer);
-    const body = try out.toOwnedSlice();
+    const body = try std.json.Stringify.valueAlloc(allocator, value, .{ .whitespace = .indent_2 });
     defer allocator.free(body);
 
-    try std.fs.File.stdout().writeAll(body);
-    try std.fs.File.stdout().writeAll("\n");
+    const stdout = std_compat.fs.File.stdout();
+    try stdout.writeAll(body);
+    try stdout.writeAll("\n");
 }
 
 fn printUsage() void {
@@ -585,7 +617,8 @@ fn printUsage() void {
         \\  POST /v1/traces
         \\  POST /otlp/v1/traces
         \\
-        , .{version.string},
+    ,
+        .{version.string},
     );
 }
 

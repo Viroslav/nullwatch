@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const std_compat = @import("compat.zig");
 
 pub const home_env_var = "NULLWATCH_HOME";
 pub const home_dir_name = ".nullwatch";
@@ -20,7 +21,7 @@ pub fn resolveConfigPath(allocator: std.mem.Allocator, override_path: ?[]const u
 }
 
 pub fn resolveHomeDir(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, home_env_var)) |env_home| {
+    if (std_compat.process.getEnvVarOwned(allocator, home_env_var)) |env_home| {
         return env_home;
     } else |err| switch (err) {
         error.EnvironmentVariableNotFound => {},
@@ -33,7 +34,7 @@ pub fn resolveHomeDir(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = std_compat.fs.cwd().openFile(path, .{}) catch |err| {
         if (err == error.FileNotFound) return Config{};
         return err;
     };
@@ -56,10 +57,10 @@ fn resolveRelativePath(allocator: std.mem.Allocator, config_path: []const u8, va
 }
 
 fn getHomeDirOwned(allocator: std.mem.Allocator) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+    return std_compat.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => {
             if (builtin.os.tag == .windows) {
-                return std.process.getEnvVarOwned(allocator, "USERPROFILE") catch error.HomeNotSet;
+                return std_compat.process.getEnvVarOwned(allocator, "USERPROFILE") catch error.HomeNotSet;
             }
             return error.HomeNotSet;
         },
@@ -79,8 +80,9 @@ test "resolveRelativePaths anchors data dir to config directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("configs");
-    try tmp.dir.writeFile(.{
+    const tmp_dir = std_compat.fs.Dir.wrap(tmp.dir);
+    try tmp_dir.makePath("configs");
+    try tmp_dir.writeFile(.{
         .sub_path = "configs/config.json",
         .data =
         \\{
@@ -89,7 +91,7 @@ test "resolveRelativePaths anchors data dir to config directory" {
         ,
     });
 
-    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "configs/config.json");
+    const cfg_path = try tmp_dir.realpathAlloc(std.testing.allocator, "configs/config.json");
     defer std.testing.allocator.free(cfg_path);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

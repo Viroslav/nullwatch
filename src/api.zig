@@ -1,4 +1,5 @@
 const std = @import("std");
+const std_compat = @import("compat.zig");
 const domain = @import("domain.zig");
 const Store = @import("store.zig").Store;
 const version = @import("version.zig");
@@ -365,14 +366,14 @@ fn ingestOtlpScopeSpans(
             const run_id = (try firstOtlpAttributeText(ctx.allocator, attrs, &.{ "nullwatch.run_id", "nulltickets.run_id", "run_id" })) orelse
                 (try firstOtlpAttributeText(ctx.allocator, resource_attributes, &.{ "nullwatch.run_id", "nulltickets.run_id", "run_id" })) orelse
                 trace_id;
-            const source = (try firstOtlpAttributeText(ctx.allocator, resource_attributes, &.{ "service.name" })) orelse
+            const source = (try firstOtlpAttributeText(ctx.allocator, resource_attributes, &.{"service.name"})) orelse
                 scope_name orelse
                 "otlp";
             const operation = span.name orelse "unnamed";
-            const started_at_ms = parseUnixNanoMs(span.startTimeUnixNano) orelse std.time.milliTimestamp();
+            const started_at_ms = parseUnixNanoMs(span.startTimeUnixNano) orelse std_compat.time.milliTimestamp();
             const ended_at_ms = parseUnixNanoMs(span.endTimeUnixNano);
             const attributes_json = try otlpAttributesJson(ctx.allocator, attrs);
-            const success_text = try firstOtlpAttributeText(ctx.allocator, attrs, &.{ "success" });
+            const success_text = try firstOtlpAttributeText(ctx.allocator, attrs, &.{"success"});
             const status = determineOtlpStatus(span, success_text);
             const error_message = if (span.status) |status_payload|
                 status_payload.message orelse (try firstOtlpAttributeText(ctx.allocator, attrs, &.{ "error_message", "message", "detail" }))
@@ -626,10 +627,7 @@ fn jsonResponse(allocator: std.mem.Allocator, status_code: u16, value: anytype) 
 }
 
 fn encodeJson(allocator: std.mem.Allocator, value: anytype) ![]u8 {
-    var out = std.io.Writer.Allocating.init(allocator);
-    defer out.deinit();
-    try std.json.Stringify.value(value, .{}, &out.writer);
-    return try out.toOwnedSlice();
+    return try std.json.Stringify.valueAlloc(allocator, value, .{});
 }
 
 fn statusTextFromCode(status_code: u16) []const u8 {
