@@ -1,5 +1,9 @@
 name: Release
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  ZIG_VERSION: "0.16.0"
+
 on:
   push:
     tags: ['v*']
@@ -45,12 +49,10 @@ jobs:
             ext: ".exe"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Install Zig 0.15.2
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
+      - name: Install Zig 0.16.0
+        run: bash .github/scripts/install-zig.sh "${ZIG_VERSION}"
 
       - name: Resolve build version
         id: version
@@ -65,7 +67,7 @@ jobs:
         run: zig build -Doptimize=ReleaseSmall -Dversion=${{ steps.version.outputs.value }} -Dtarget=${{ matrix.zig_target }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nullwatch-${{ matrix.target }}
           path: zig-out/bin/nullwatch${{ matrix.ext }}
@@ -78,7 +80,7 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Create source archive
         run: |
@@ -92,7 +94,7 @@ jobs:
           echo "ARCHIVE_NAME=${archive_name}" >> "$GITHUB_ENV"
 
       - name: Upload source archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nullwatch-source
           path: ${{ env.ARCHIVE_NAME }}
@@ -105,7 +107,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
 
       - name: Rename binaries
         run: |
