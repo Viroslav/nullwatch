@@ -278,7 +278,23 @@ pub fn accessAbsolute(absolute_path: []const u8, options: Dir.AccessOptions) Io.
 }
 
 pub fn makeDirAbsolute(absolute_path: []const u8) Io.Dir.CreateDirError!void {
-    try Io.Dir.createDirAbsolute(shared.io(), absolute_path, .default_dir);
+    const parent_dir = path.dirname(absolute_path);
+    if (parent_dir) |parent| {
+        var dir = openDirAbsolute(parent, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try makeDirAbsolute(parent);
+                return makeDirAbsolute(absolute_path);
+            },
+            else => {
+                return error.PathAlreadyExists;
+            },
+        };
+        defer dir.close();
+        const base_name = path.basename(absolute_path);
+        try dir.makeDir(base_name);
+    } else {
+        try Io.Dir.createDirAbsolute(shared.io(), absolute_path, .default_dir);
+    }
 }
 
 pub fn deleteFileAbsolute(absolute_path: []const u8) Io.Dir.DeleteFileError!void {
